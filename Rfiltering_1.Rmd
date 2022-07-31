@@ -1,0 +1,480 @@
+---
+title: "Filtering trnl tabular file"
+output: word_document
+---
+
+# Aghitu-3 data filtering
+
+This Rmarkdown file uses the results from OBITools processing as input and further filters the metabarcoding data.
+The code provided here is a mash-up from different sources, including the ForBio course: DNA Metabarcoding: Data processing and interpretation.
+Special thanks and credit goes to the teachers: 
+Eric Coissac
+Frederic Boyer
+Youri Lammers
+
+
+
+
+# Preparation before filtering 
+
+```{r}
+# Prepare the R environment
+require(tidyverse)
+```
+
+## Setting the filters
+```{r}
+# Filter thresholds to be adjusted according to experiment
+bestid_thr = 0.975 # for best identity match with reference database
+thrCount_motu <- 10 # minimal number of reads to keep a MOTU
+```
+
+## Loading the data
+```{r}
+raw = read.delim(file = "../data/assigned_taxo_clean005_ann.tab")
+```
+
+In 'raw' the OTUs are in rows and all of the information (quality, taxonomy, readcounts, etc.) in columns
+Here we prepare a transformed version of the OTU table and separate it into specific tables:
+ - samples
+ - motus
+ - reads
+ 
+```{r}
+# motus should be a dataframe with the metadata for the motu ids
+# so we need a subset of the 'raw' dataframe without the readcounts
+motus = select(raw, -(starts_with('sample')))
+# and the opposite subset for the reads table
+reads = select(raw, starts_with('sample'))
+# change NAs (reads found for one database but not the other) into zeros 
+# NOTE: this is not necessary for the mammal data
+reads[is.na(reads)] = 0
+rownames(motus) = motus$id
+rownames(reads) = motus$id
+
+# Samples should just be a dataframe with complete samplenames as rownames and as a column "Samples"
+# so let's extract the sample names from the reads table
+names = as.character(colnames(reads))
+samplenames_split = strsplit(names,"[.]")
+
+# save the last part as the sample name
+samplenames = sapply(samplenames_split,
+                   function(x) paste0("AGH", x[length(x)]))
+samples = data.frame(sample = samplenames)
+rownames(samples) = samplenames
+
+# make sure the names match for the samples and reads tables
+colnames(reads) = samplenames 
+
+reads = as.data.frame(t(reads)) # make the rows = samples and columns = MOTUs
+```
+
+```{r}
+# check the dimensions of the resulting dataframes
+dim(motus)
+dim(samples)
+dim(reads)
+sum(rowSums(reads))
+```
+
+
+### extract sample names
+```{r}
+# get sample names
+sample_names = as.character(samples$sample)
+
+# Split the names on the underscores
+sample_names_split = strsplit(sample_names,"_")
+#head(sample_names_split)
+
+# save the last part as replicate
+replicate = sapply(sample_names_split,
+                   function(x) x[length(x)])
+
+# save the first part as the sample id
+sample_id = sapply(sample_names_split,
+                   function(x) x[1])
+
+sample_type = sapply(sample_names_split,
+                   function(x) x[2])
+# label everyting as sample, except the controls
+sample_type[grep(pattern = "^s",sample_type)]="sample"
+sample_type[grep(pattern = "^pnc",sample_type)]="pcrneg"
+sample_type[grep(pattern = "^enc",sample_type)]="extneg"
+sample_type[is.na(sample_type)]="leakage" # we found some unused tags such as "trnL170"
+```
+
+```{r}
+# builds a data frame with the sample descriptions
+sample_desc = data.frame(name      = sample_names,
+                         sample_id = sample_id,
+                         replicate = replicate,
+                         type      = sample_type,
+                         nonReplicating = FALSE # needed later on for filtering
+                         )
+rownames(sample_desc) = sample_desc$name
+
+# Substitute the old sample description by the new one
+samples = sample_desc
+```
+
+
+### Add MOTU information
+```{r}
+sequence_type = rep("Unknown",nrow(motus))
+
+# check the best identity of the sequences and label them as embl when above the threshold
+sequence_type[motus$`best_identity.trnl_r142` >= bestid_thr] = "embl" 
+
+motus$sequence_type=factor(sequence_type)
+motus$counts_in_blanks = sapply(reads[samples$type != "sample",], sum)
+motus$in_blanks = motus$counts_in_blanks > 0
+```
+
+
+## Having a look at the data 
+
+```{r}
+df = motus[, c("best_identity.trnl_r142", "species_list.trnl_r142")]
+df$species_list = strsplit(df$species_list.trnl_r142, ", ")[]
+df$species_number = as.numeric(unlist(lapply(df$species_list, length)))
+df$best_id = as.numeric(df$best_identity.trnl_r142)
+
+require(ggplot2)
+require(ggpubr)
+ggplot(df, aes(x=best_id, y=species_number)) + 
+  geom_point() +
+  geom_smooth(method="lm")+
+  theme_classic2() +
+  theme(axis.text = element_text(colour = "black"))
+
+# or alternatively:
+require(ggstatsplot)
+ggscatterstats(df, best_id, species_number, type="bayesian")
+```
+
+### Basic descriptions of the samples
+```{r}
+#The dataset is constituted of 
+nrow(reads) #PCRs replicates for
+ncol(reads) #MOTUs 
+
+# Counting the reads per PCR reaction
+reads_per_pcr = rowSums(reads)
+
+# Counting the MOTUs per PCR reaction
+motus_per_pcr = rowSums(reads > 0)
+
+# Counting the reads per sample
+reads_per_sample = aggregate(reads_per_pcr, list(sample_id), FUN=sum)
+reads_per_sample[order(reads_per_sample$x, decreasing = FALSE),]
+
+# Counting the MOTUs per sample
+motus_per_sample = aggregate(motus_per_pcr, list(sample_id), FUN=sum)
+motus_per_sample[order(motus_per_sample$x, decreasing = FALSE),]
+```
+
+
+```{r}
+# taking a look at the distribution
+par(mfrow=c(1,2))
+hist(log10(reads_per_pcr),
+     breaks=50,
+     main = "Reads per PCR",
+     xlab="Reads count (log scale)")
+hist(motus_per_pcr,breaks=50,
+     main = "MOTUs per PCR",
+     xlab="MOTU count")
+```
+
+
+## cleaning up the annotations we no longer need
+```{r}
+# annotations we want to keep
+idx= c("id", "count", "best_identity.trnl_r142",
+       "family_name", "genus_name", "species_name", 
+       "scientific_name", "seq_length", "sequence", "species_list.trnl_r142", "counts_in_blanks","in_blanks")
+motus = motus[, idx]
+
+# rename 
+motus$best_id = motus$`best_identity.trnl_r142`
+motus$`best_identity.trnl_r142` = NULL
+
+# most abundant MOTUs on top
+idx = order(colSums(reads), decreasing=T)
+motus = motus[idx,]
+reads = reads[,idx]
+colnames(reads) = motus$id
+
+samples = samples[match(rownames(reads), rownames(samples)),]
+```
+
+
+## Identify artifacts
+
+### Reagent contaminants
+
+Identification of OTUs of maximum abundance in the extraction and pcr blanks
+
+```{r, results="hide", warning=FALSE}
+stopifnot(all(rownames(samples)==rownames(reads)))
+
+maxInExtractionCtrl <- apply(reads[samples$type=='extneg',], MARGIN=2, function(x) max(x,na.rm = T))
+maxInPCRCtrl        <- apply(reads[samples$type=='pcrneg',], MARGIN=2, function(x) max(x,na.rm = T)) 
+maxInSamples        <- apply(reads[samples$type=='sample',], MARGIN=2, function(x) max(x,na.rm = T)) 
+
+df <- data.frame(maxInExtractionCtrl, maxInPCRCtrl, maxInSamples)
+
+#determining the type of problematic OTU
+motus$bias <- c('extneg','pcrneg',NA)[apply(df, MARGIN=1, FUN=which.max)]
+
+#adding OTUs infos
+infosCols <- c("count", "best_id", "family_name", "genus_name","species_name", "bias")
+
+df <- cbind(df, motus[,infosCols])
+
+#keeping only problematic sequences for display
+
+df <- df[!is.na(df$bias),]
+df <- df[order(df$maxInExtractionCtrl+df$maxInPCRCtrl, decreasing=T),]
+```
+
+
+### Visualizing the level of contaminants in the samples
+
+```{r}
+stopifnot(all(colnames(reads)==motus$id))
+
+if (dim(df)[1] > 1) {
+  plot(rowSums(reads[, !is.na(motus$bias)]), rowSums(reads[,!is.na(motus$bias)]>0), 
+     col=as.factor(samples[rownames(reads), 'type']),
+     log='xy', pch=16, xlab='#Reads', ylab='#OTUs')
+
+  legend('topleft', 
+       legend = levels(as.factor(samples[rownames(reads), 'type'])),
+       col=1:nlevels(as.factor(samples[rownames(reads), 'type'])), 
+       pch=16, cex=0.5)
+} else {
+  plot(sum(reads[, !is.na(motus$bias)]), sum(reads[,!is.na(motus$bias)]>0), 
+     col=as.factor(samples[rownames(reads), 'type']),
+     log='xy', pch=16, xlab='#Reads', ylab='#OTUs')
+
+  legend('topleft', 
+       legend = levels(as.factor(samples[rownames(reads), 'type'])),
+       col=1:nlevels(as.factor(samples[rownames(reads), 'type'])), 
+       pch=16, cex=0.5)
+}
+
+```
+
+
+# Filtering steps
+
+## Removing the contaminants
+
+```{r}
+table(motus$bias)
+```
+
+```{r}
+correctedCounts2 <- reads
+
+correctedCounts2[,motus$in_blanks] <- 0  ## removing contaminants based merely on presence in blanks
+
+# check how many are removed; FALSE means they're empty; TRUE means that they're kept
+table(colSums(correctedCounts2) > 0)
+
+
+plot(rowSums(reads), rowSums(correctedCounts2), xlab='#Reads before cleaning for contaminants',
+     ylab='#Reads after cleaning for contaminants', main='Effect of contaminants removal\non #Reads',
+     col=as.factor(samples[rownames(reads), 'type']), pch=16)
+abline(a=0,b=1)
+
+legend('topleft', 
+       legend = levels(as.factor(samples[rownames(reads), 'type'])),
+       col=1:nlevels(as.factor(samples[rownames(reads), 'type'])), 
+       pch=16, cex=0.5)
+
+plot(rowSums(reads>0), rowSums(correctedCounts2>0), xlab='#OTUs before cleaning for contaminants',
+     ylab='#OTUs after cleaning for contaminants', main='Effect of contaminants removal\non #OTUs',
+     col=as.factor(samples[rownames(reads), 'type']), pch=16)
+abline(a=0,b=1)
+
+legend('topleft', 
+       legend = levels(as.factor(samples[rownames(reads), 'type'])),
+       col=1:nlevels(as.factor(samples[rownames(reads), 'type'])), 
+       pch=16, cex=0.5)
+
+```
+
+```{r}
+sum(colSums(correctedCounts2) > 0) # total number of motus left
+sum(rowSums(correctedCounts2)) # total number of reads left
+```
+```{r}
+# updating the tables
+correctedCounts2 = correctedCounts2[rowSums(correctedCounts2) > 0, colSums(correctedCounts2) > 0] # filter out empty sequences and samples
+motus = motus[colnames(correctedCounts2),]
+samples = samples[rownames(correctedCounts2),]
+dim(correctedCounts2)
+```
+
+
+## Removing bad MOTUs
+
+Bad MOTUs are those: 
+- that score below a specified identity threshold
+- occurring with < 10 reads in the entire dataset
+
+
+### ID threshold < XX % match
+```{r}
+# keeping track of things
+table(colSums(correctedCounts2) > 0) # TRUE are those that are kept
+
+# determining which are below the bestid_thr and removing those from the reads
+motus$below_bestid_thr = motus$best_id<bestid_thr
+correctedCounts2[,motus$below_bestid_thr] <- 0 
+
+# now check again, the number for TRUE should be smaller
+table(colSums(correctedCounts2) > 0)
+
+sum(colSums(correctedCounts2) > 0) # total number of motus left
+sum(rowSums(correctedCounts2)) # total number of reads left
+```
+```{r}
+# updating the tables
+correctedCounts2 = correctedCounts2[rowSums(correctedCounts2) > 0,colSums(correctedCounts2) > 0] # filter out empty sequences and samples
+motus = motus[colnames(correctedCounts2),]
+samples = samples[rownames(correctedCounts2),]
+
+dim(correctedCounts2)
+```
+
+
+### Sequence/MOTU minimal count filter threshold < 10 reads in a PCR repeat
+```{r}
+# determining which cells are below a certain read count and removing those from the reads
+correctedCounts2[correctedCounts2<thrCount_motu] = 0 # set cell to 0
+
+# check how many
+table(colSums(correctedCounts2) > 0)
+```
+```{r}
+# save and check what is left
+reads1 = correctedCounts2[rowSums(correctedCounts2) > 0, colSums(correctedCounts2) > 0] # filter out empty sequences and samples
+motus1 = motus[colnames(reads1),]
+samples1 = samples[rownames(reads1),]
+
+# check number of replicates, motus and reads
+dim(reads1)
+sum(colSums(reads1)) # total number of reads left
+```
+
+## Removing PCR repeats with < .... reads in total
+```{r}
+thrCount_pcr = 10
+# removing those with low amount of reads / empty ones
+l <- lapply(levels(as.factor(samples[rownames(reads1), 'type'])), function(st) {
+  if (is.null(dim(reads1[samples[rownames(reads1), 'type']==st,]))) {
+    sum(reads1[samples[rownames(reads1), 'type']==st,])
+  } else {
+  rowSums(reads1[samples[rownames(reads1), 'type']==st,])
+  }
+})
+names(l) <- levels(as.factor(samples[rownames(reads1), 'type']))
+
+boxplot(l, las=2, cex=0.25, outpch=NA, main='#reads before filtering')
+stripchart(l, vertical = T, 
+           method="jitter", pch=16, cex=0.4, add=T)
+abline(h=thrCount_pcr, col='red')
+```
+
+```{r}
+## labelling samples that are below a threshold readcount
+samples1$empty_PCR <- FALSE
+
+stopifnot(all(rownames(samples1)==rownames(reads1)))
+samples1$empty_PCR[rowSums(reads1)<thrCount_pcr] <- TRUE
+
+## filtering out those that are "empty" (both PCR repeats as sequences)
+correctedCounts3 = reads1[!samples1$empty_PCR, colSums(reads1) > 0]
+
+reads2 = correctedCounts3[rowSums(correctedCounts3) > 0,] ## not sure this step is needed, but doesn't hurt
+motus2 = motus[colnames(reads2),]
+samples2 = samples[rownames(reads2),]
+```
+
+```{r}
+# how many replicates, motus and reads do we have left?
+dim(reads2)
+```
+```{r}
+sum(colSums(reads2) > 0) # total number of motus left
+sum(rowSums(reads2)) # total number of reads left
+```
+
+# Save the resulting files
+
+```{r}
+write.csv(motus2,file = paste0("../results/", bestid_thr, "_count", thrCount_motu,"_cleanrepeats_motus.csv"))
+write.csv(reads2,file = paste0("../results/", bestid_thr, "_count", thrCount_motu,"_cleanrepeats_reads.csv")) 
+write.csv(samples2,file = paste0("../results/", bestid_thr, "_count", thrCount_motu,"_cleanrepeats_samples.csv")) 
+```
+
+
+## getting some basic understanding of what is left
+
+```{r}
+# which samples are still there?
+reads_per_sample = rowSums(reads2)
+motus_per_sample = rowSums(reads2 > 0)
+
+plot(reads_per_sample,motus_per_sample,
+     xlab="Read counts",
+     ylab="MOTU counts",
+     col=as.factor(samples2$type),
+     pch=19, cex=1,
+     log="xy"
+     )
+
+# create a transparent color
+mygrey <- rgb(20, 20, 20, max = 255, alpha = 100, names = "black") # alpha is 0-255
+
+text(reads_per_sample,motus_per_sample, labels=rownames(reads2), col = mygrey, cex=0.6, font=2)
+
+```
+
+```{r}
+# how many samples have more than 1 motu?
+length(motus_per_sample[motus_per_sample>1]) 
+
+# how many samples have more than 5 motus?
+length(motus_per_sample[motus_per_sample>5])
+```
+```{r}
+table(samples2$sample_id)
+```
+
+
+```{r}
+# get summary information about the plants that we found
+tmp = unique(motus2$family_name)
+motus2$family_name = as.character(motus2$family_name)
+motus2$family_name[is.na(motus2$family_name)] <- "unknown"
+
+# calculate the number of reads per motu
+motus2$count = colSums(reads2)
+
+# calculate the number of reads per family
+reads_per_fam = aggregate(motus2$count, list(family = motus2$family_name), sum)
+reads_per_fam[order(reads_per_fam$x, decreasing = TRUE),]
+
+# calculate the number of reads per genus
+reads_per_gen = aggregate(motus2$count, list(genus = motus2$genus_name), sum)
+reads_per_gen[order(reads_per_gen$x, decreasing = TRUE),]
+
+# calculate the number of reads per species
+reads_per_spec = aggregate(motus2$count, list(species = motus2$species_name), sum)
+reads_per_spec[order(reads_per_spec$x, decreasing = TRUE),]
+```

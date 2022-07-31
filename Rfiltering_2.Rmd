@@ -1,0 +1,205 @@
+---
+title: "Statistical analysis Agithu-3 data"
+output: word_document
+---
+
+# Statistical analysis Agithu-3 data
+
+The data used here has been previously filtered using Rfiltering_1.Rmd and manually curated.
+Output files of Rfiltering_1.Rmd were:
+* 0.975_count10_cleanrepeats_motus.csv
+* 0.975_count10_cleanrepeats_reads.csv
+* 0.975_count10_cleanrepeats_samples.csv
+
+Manual curation was performed to mitigate potential biases. A taxonomic expert checked the taxonomic annotations to assess the likeliness of occurrence in the region at the time. Based on this assessment, several taxonomic assignments were adjusted and we added a column "to_exclude" with TRUE or FALSE values to the motu table. This was set to TRUE for sequences with <98% ID match, without family annotation, or deemed unlikely (see SOM table S3).
+We also added further metadata on the samples to the samples table and renamed the adjusted .csv files to:
+* DNAplants.csv
+* DNAdata.csv
+* DNAsamples.csv
+
+
+## Prepare the R environment
+
+```{r}
+library(tidyverse)
+library(vegan)
+library(ggpubr)
+library(wesanderson)
+```
+
+## Loading of the dna data
+
+```{r}
+dna_plants = read.csv2(file="../data/DNAplants.csv", row.names = 1, na.strings=c(""," ","NA"))
+dna_repsdata = read.csv2(file="../data/DNAdata.csv", row.names = 1)
+dna_samples = read.csv2(file="../data/DNAsamples.csv", row.names = 1)
+
+#ensure the order of the plants are the same in both tables
+dna_repsdata = dna_repsdata[order(match(rownames(dna_repsdata), rownames(dna_plants))), ]
+
+# cast as numeric instead of character
+dna_repsdata = as.data.frame(lapply(dna_repsdata, as.numeric))
+rownames(dna_repsdata) = rownames(dna_plants) # re-add the rownames
+
+#ensure the order of the samples are the same in both tables
+dna_repsdata = dna_repsdata[order(match(rownames(dna_repsdata), rownames(dna_samples))), ]
+
+dim(dna_plants)
+dim(dna_repsdata) # plants as columns, replicates as rows
+dim(dna_samples)
+rownames(dna_samples) = dna_samples$sample_id
+```
+
+```{r}
+# see how many replicates we have per sample
+# let's extract the sample names from the reads table
+names = as.character(colnames(dna_repsdata))
+samplenames_split = strsplit(names,"[_]")
+
+# save the first part as the sample name
+samplenames = sapply(samplenames_split,
+                   function(x) x[1])
+
+replicates = sapply(samplenames_split,
+                   function(x) x[length(x)])
+
+dna_reps = data.frame(sample = samplenames,
+                      replicate = replicates)
+head(dna_reps)
+table(dna_reps$sample)
+```
+## Further filtering steps
+
+
+### Remove plants present in < 2 PCR replicates
+```{r}
+# prepare a binary table
+dna_repsbin = dna_repsdata
+dna_repsbin[dna_repsbin > 0] <- 1
+
+# remove plants only present in 1 rep
+dna_plants = dna_plants[rowSums(dna_repsbin)>1, ]
+dna_repsdata = dna_repsdata[rowSums(dna_repsbin)>1, ] 
+dim(dna_repsdata)
+sum(rowSums(dna_repsdata))
+```
+
+```{r}
+# remove plants we want to exclude, as per 'to_exclude' column:
+# with <98% ID match,
+# without family annotation, 
+# or deemed unlikely by a taxonomic expert
+
+dna_repsdata = dna_repsdata[dna_plants$to_exclude == FALSE, ]
+dna_plants = dna_plants[dna_plants$to_exclude == FALSE, ] 
+
+# remove replicates that are now empty
+dna_repsdata = dna_repsdata[,colSums(dna_repsdata)!=0] 
+
+dim(dna_repsdata)
+sum(rowSums(dna_repsdata))
+```
+
+```{r}
+write.csv(dna_repsdata, "../results/dna_dataperreplicate_cleaned.csv")
+write.csv(dna_plants, "../results/dna_plants_cleaned.csv")
+```
+
+### getting the sample information to merge the filtered replicates
+```{r}
+# let's extract the sample names from the reads table
+names = as.character(colnames(dna_repsdata))
+samplenames_split = strsplit(names,"[_]")
+
+# save the first part as the sample name
+samplenames = sapply(samplenames_split,
+                   function(x) x[1])
+
+replicates = sapply(samplenames_split,
+                   function(x) x[length(x)])
+
+dna_reps = data.frame(sample = samplenames,
+                      replicate = replicates)
+```
+
+```{r}
+# make a temporary dataframe to save the number of replicates per sample
+rs = as.data.frame(table(dna_reps$sample))
+
+# check which samples are missing
+missingrows = setdiff(rownames(dna_samples),rs$Var1)
+missingrows = data.frame( "Var1" = missingrows,
+                          "Freq" = rep(0, length(missingrows))
+                          )
+
+# add the missing samples
+rs = rbind(rs, missingrows)
+rownames(rs) = rs$Var1
+
+# reorder the table to match the rownames
+rs_ordered = rs[order(match(rs$Var1, rownames(dna_samples))), ]
+
+# add the number of replicates per sample to the samples dataframe
+dna_samples$replicates = rs_ordered$Freq
+```
+
+
+### Merge the replicates
+```{r}
+# prepare a binary table
+dna_repsbin = dna_repsdata
+dna_repsbin[dna_repsbin > 0] <- 1
+
+# merge the DNA data sample replicates to get a reads per sample table
+dna_data = aggregate(t(dna_repsdata), list(dna_reps$sample), FUN=sum)
+rownames(dna_data) = dna_data$Group.1
+dna_data$Group.1 = NULL
+
+# merge the binary DNA data sample replicates to get a replicates per sample table
+dna_repdata = aggregate(t(dna_repsbin), list(dna_reps$sample), FUN=sum)
+rownames(dna_repdata) = dna_repdata$Group.1
+dna_repdata$Group.1 = NULL
+```
+
+```{r}
+# set samples with only one replicate to 0
+#to_remove = rownames(dna_samples[dna_samples$replicates == 1,])
+to_remove = which(rowSums(dna_repdata) == 1)
+dna_data = dna_data[!rownames(dna_data) %in% to_remove,]
+dna_repdata = dna_repdata[!rownames(dna_repdata) %in% to_remove,]
+dim(dna_data)
+sum(rowSums(dna_data))
+```
+```{r}
+#  remove plants only in 1 rep
+dna_data = dna_data[ , colSums(dna_repdata)>1 ] 
+dna_plants = dna_plants[colSums(dna_repdata)>1, ]
+dna_repdata = dna_repdata[ , colSums(dna_repdata)>1] 
+
+dim(dna_plants)
+dim(dna_data)
+dim(dna_repdata)
+dim(dna_samples)
+sum(rowSums(dna_data))
+```
+```{r}
+# prepare a missing sample row with only 0s
+empty=matrix(c(rep.int(0,length(dna_data))),nrow=length(setdiff(dna_samples$sample_id, rownames(dna_data))),ncol=length(dna_data))  
+colnames(empty) = colnames(dna_data)  
+rownames(empty) = setdiff(dna_samples$sample_id, rownames(dna_data))
+
+# add the missing sample to the DNA data tables
+dna_data = rbind(dna_data, empty)
+dna_repdata = rbind(dna_repdata, empty)
+
+# make sure the names match for the tables
+dna_data = dna_data[match(rownames(dna_samples), rownames(dna_data)), match(rownames(dna_plants), colnames(dna_data))]
+dna_repdata = dna_repdata[match(rownames(dna_samples), rownames(dna_repdata)), match(rownames(dna_plants), colnames(dna_repdata))]
+
+# check the total number of reads
+sum(rowSums(dna_data))
+
+write.csv(dna_data, "../results/dna_datareads_clean.csv")
+write.csv(dna_repdata, "../results/dna_datareps_clean.csv")
+write.csv(dna_plants, "../results/dna_plants_clean.csv")
+```
